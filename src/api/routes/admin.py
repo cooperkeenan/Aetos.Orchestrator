@@ -3,11 +3,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from src.api.dependencies import (
-    get_create_listings_use_case,
-    get_listing_history_use_case,
+    get_history_repo,
     get_listing_repo,
     get_scraper_coordinator,
-    get_transition_state_use_case,
 )
 from src.api.schemas.listing_responses import (
     ListingHistoryResponse,
@@ -18,21 +16,22 @@ from src.api.schemas.listing_responses import (
     TriggerScrapeRequest,
     TriggerScrapeResponse,
 )
-from src.application.interfaces.listing_repository import ListingRepository
-from src.application.use_cases.get_listing_history import GetListingHistory, GetListingHistoryInput
-from src.application.use_cases.transition_listing_state import (
-    ListingNotFoundError,
-    TransitionListingState,
-    TransitionListingStateInput,
-)
-from src.application.coordinators.scraper_coordinator import ScraperCoordinator
+from src.domain.entities.product_listing import ProductListing
 from src.domain.enums.listing_state import ListingState
 from src.domain.state_machine.lifecycle_state_machine import InvalidStateTransitionError
+from src.infrastructure.database.repositories.listing_repository import (
+    SqlAlchemyListingRepository,
+)
+from src.infrastructure.database.repositories.state_history_repository import (
+    SqlAlchemyStateHistoryRepository,
+)
+from src.infrastructure.external_services.scraper_coordinator import ScraperCoordinator
+from src.infrastructure.messaging.rabbitmq_publisher import RabbitMQPublisher
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-def _listing_to_response(listing) -> ListingResponse:  # type: ignore[no-untyped-def]
+def _listing_to_response(listing: ProductListing) -> ListingResponse:
     return ListingResponse(
         id=listing.id,
         product_id=listing.product_id,
@@ -71,7 +70,7 @@ async def list_listings(
     brand: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    repo: ListingRepository = Depends(get_listing_repo),
+    repo: SqlAlchemyListingRepository = Depends(get_listing_repo),
 ) -> PaginatedListingsResponse:
     """List product listings with optional filtering."""
     listings, total = await repo.list_all(state=state, brand=brand, limit=limit, offset=offset)
@@ -86,7 +85,7 @@ async def list_listings(
 @router.get("/listings/{listing_id}", response_model=ListingResponse)
 async def get_listing(
     listing_id: UUID,
-    repo: ListingRepository = Depends(get_listing_repo),
+    repo: SqlAlchemyListingRepository = Depends(get_listing_repo),
 ) -> ListingResponse:
     listing = await repo.get_by_id(listing_id)
     if listing is None:
@@ -97,15 +96,16 @@ async def get_listing(
 @router.get("/listings/{listing_id}/history", response_model=ListingHistoryResponse)
 async def get_listing_history(
     listing_id: UUID,
-    use_case: GetListingHistory = Depends(get_listing_history_use_case),
+    listing_repo: SqlAlchemyListingRepository = Depends(get_listing_repo),
+    history_repo: SqlAlchemyStateHistoryRepository = Depends(get_history_repo),
 ) -> ListingHistoryResponse:
-    try:
-        result = await use_case.execute(GetListingHistoryInput(listing_id=listing_id))
-    except ListingNotFoundError:
+    listing = await listing_repo.get_by_id(listing_id)
+    if listing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found.")
 
+    history = await history_repo.get_history_for_listing(listing_id)
     return ListingHistoryResponse(
-        listing_id=result.listing_id,
+        listing_id=listing_id,
         history=[
             StateHistoryEntryResponse(
                 id=entry.id,
@@ -115,7 +115,7 @@ async def get_listing_history(
                 triggered_by=entry.triggered_by,
                 metadata=entry.metadata,
             )
-            for entry in result.history
+            for entry in history
         ],
     )
 
@@ -124,25 +124,33 @@ async def get_listing_history(
 async def transition_listing(
     listing_id: UUID,
     body: TransitionRequest,
-    use_case: TransitionListingState = Depends(get_transition_state_use_case),
-    repo: ListingRepository = Depends(get_listing_repo),
+    listing_repo: SqlAlchemyListingRepository = Depends(get_listing_repo),
+    history_repo: SqlAlchemyStateHistoryRepository = Depends(get_history_repo),
 ) -> ListingResponse:
-    try:
-        await use_case.execute(
-            TransitionListingStateInput(
-                listing_id=listing_id,
-                to_state=body.to_state,
-                triggered_by="admin_api",
-                reason=body.reason,
-            )
-        )
-    except ListingNotFoundError:
+    listing = await listing_repo.get_by_id(listing_id)
+    if listing is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found.")
+
+    from_state = listing.state
+    try:
+        listing.transition_to(body.to_state, triggered_by="admin_api")
     except InvalidStateTransitionError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
 
-    listing = await repo.get_by_id(listing_id)
-    return _listing_to_response(listing)  # type: ignore[arg-type]
+    await listing_repo.save(listing)
+
+    metadata = {"reason": body.reason} if body.reason else {}
+    await history_repo.save(
+        listing_id=listing.id,
+        from_state=from_state,
+        to_state=body.to_state,
+        triggered_by="admin_api",
+        metadata=metadata,
+    )
+
+    await RabbitMQPublisher().publish_many(listing.collect_events())
+
+    return _listing_to_response(listing)
 
 
 @router.post("/scrape/trigger", response_model=TriggerScrapeResponse)

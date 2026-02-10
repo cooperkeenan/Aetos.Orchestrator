@@ -1,25 +1,19 @@
 from decimal import Decimal
 from uuid import UUID
 
-import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.application.interfaces.listing_repository import ListingRepository
 from src.domain.entities.product_listing import ProductListing
 from src.domain.enums.listing_state import ListingState
 from src.infrastructure.database.models import ProductListingModel
 
-logger = structlog.get_logger(__name__)
-
 
 def _to_domain(model: ProductListingModel) -> ProductListing:
-    """Map ORM model → domain entity."""
-
     def _dec(value: float | None) -> Decimal | None:
         return Decimal(str(value)) if value is not None else None
 
-    listing = ProductListing(
+    return ProductListing(
         id=model.id,
         product_id=model.product_id,
         marketplace_url=model.marketplace_url,
@@ -55,12 +49,9 @@ def _to_domain(model: ProductListingModel) -> ProductListing:
         error_message=model.error_message,
         error_occurred_at=model.error_occurred_at,
     )
-    return listing
 
 
 def _to_model(listing: ProductListing) -> ProductListingModel:
-    """Map domain entity → ORM model."""
-
     def _flt(value: Decimal | None) -> float | None:
         return float(value) if value is not None else None
 
@@ -102,8 +93,8 @@ def _to_model(listing: ProductListing) -> ProductListingModel:
     )
 
 
-class SqlAlchemyListingRepository(ListingRepository):
-    """SQLAlchemy-backed implementation of ListingRepository."""
+class SqlAlchemyListingRepository:
+    """SQLAlchemy implementation for listing persistence."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -111,10 +102,8 @@ class SqlAlchemyListingRepository(ListingRepository):
     async def save(self, listing: ProductListing) -> None:
         model = await self._session.get(ProductListingModel, listing.id)
         if model is None:
-            model = _to_model(listing)
-            self._session.add(model)
+            self._session.add(_to_model(listing))
         else:
-            # Update mutable fields
             model.state = listing.state.value
             model.state_changed_at = listing.state_changed_at
             model.updated_at = listing.updated_at
@@ -137,14 +126,11 @@ class SqlAlchemyListingRepository(ListingRepository):
             model.final_profit = float(listing.final_profit) if listing.final_profit else None
             model.error_message = listing.error_message
             model.error_occurred_at = listing.error_occurred_at
-
         await self._session.flush()
 
     async def get_by_id(self, listing_id: UUID) -> ProductListing | None:
         model = await self._session.get(ProductListingModel, listing_id)
-        if model is None:
-            return None
-        return _to_domain(model)
+        return _to_domain(model) if model is not None else None
 
     async def list_all(
         self,

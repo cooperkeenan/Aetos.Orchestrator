@@ -1,15 +1,20 @@
+from dataclasses import dataclass
+from uuid import UUID
+
 import structlog
 
-from src.application.interfaces.service_coordinator import (
-    ScraperCoordinatorInterface,
-    ScraperJobResult,
-)
 from src.infrastructure.external_services.scraper_client import ScraperClient
 
 logger = structlog.get_logger(__name__)
 
 
-class ScraperCoordinator(ScraperCoordinatorInterface):
+@dataclass
+class ScraperJobResult:
+    job_id: UUID
+    status: str
+
+
+class ScraperCoordinator:
     """Drives ScraperV2 via its HTTP API."""
 
     def __init__(self, client: ScraperClient) -> None:
