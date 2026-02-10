@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "aetos-orchestrator"
+version = "0.1.0"
+description = "Orchestrator service for camera buying/reselling lifecycle management"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+env = [
+    "DATABASE_URL=postgresql://aetos:aetos@localhost:5432/aetos_orchestrator_test",
+    "RABBITMQ_URL=amqp://aetos:aetos@localhost:5672/",
+    "SCRAPER_API_URL=http://scraperv2:8000",
+    "CHATTERBOT_API_URL=http://chatterbot:8000",
+    "EBAY_API_URL=http://ebaylister:8000",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = true
