@@ -1,13 +1,14 @@
 """Azure Functions entry point for Aetos Orchestrator."""
+
 import asyncio
 import json
 import logging
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 import azure.functions as func
 from sqlalchemy import text
-from decimal import Decimal
 
 from src.api.schemas.scraper_webhook import ScraperJobCompleteWebhookPayload
 from src.config import settings
@@ -18,11 +19,11 @@ from src.infrastructure.database.connection import AsyncSessionLocal
 from src.infrastructure.database.repositories.listing_repository import (
     SqlAlchemyListingRepository,
 )
-from src.infrastructure.database.repositories.state_history_repository import (
-    SqlAlchemyStateHistoryRepository,
-)
 from src.infrastructure.database.repositories.search_rotation_repository import (
     SearchRotationRepository,
+)
+from src.infrastructure.database.repositories.state_history_repository import (
+    SqlAlchemyStateHistoryRepository,
 )
 from src.infrastructure.external_services.scraper_client import ScraperClient
 from src.infrastructure.external_services.scraper_coordinator import ScraperCoordinator
@@ -42,34 +43,34 @@ async def poll_scraper_and_process(job_id: str, brand: str, search_term: str) ->
     coordinator = ScraperCoordinator(ScraperClient())
     max_polls = 40  # 40 * 3 min = 2 hours max
     poll_count = 0
-    
+
     logging.info(f"Starting polling for job {job_id}")
-    
+
     while poll_count < max_polls:
         try:
             # Wait 3 minutes before checking (first check after 3 min)
             await asyncio.sleep(180)  # 3 minutes
             poll_count += 1
-            
+
             logging.info(f"Polling job {job_id} (attempt {poll_count}/{max_polls})")
             status_data = await coordinator.get_job_status(job_id)
-            
+
             status = status_data.get("status")
             logging.info(f"Job {job_id} status: {status}")
-            
+
             if status == "completed":
                 logging.info(f"Job {job_id} completed! Processing results...")
-                
+
                 # Extract matches from result
                 result = status_data.get("result", {})
                 matches = result.get("matches", [])
-                
+
                 logging.info(f"Found {len(matches)} matches for {brand}")
-                
+
                 if matches:
                     # Process matches - create lifecycle records
                     created_ids = await process_scraper_matches(job_id, brand, matches)
-                    
+
                     # TODO: Send to Chatterbot (Phase 2)
                     # For now, just log the matches
                     logging.info(f"=== MATCHES TO SEND TO CHATTERBOT ===")
@@ -80,43 +81,55 @@ async def poll_scraper_and_process(job_id: str, brand: str, search_term: str) ->
                             f"  - {product_info.get('brand')} {product_info.get('model')}: "
                             f"£{listing_info.get('price')} at {listing_info.get('url')}"
                         )
-                    logging.info(f"=== END MATCHES (created {len(created_ids)} lifecycle records) ===")
+                    logging.info(
+                        f"=== END MATCHES (created {len(created_ids)} lifecycle records) ==="
+                    )
                 else:
                     logging.info(f"No matches found for {brand}")
-                
+
                 # Stop the scraper container to save costs
                 try:
-                    logging.info(f"Stopping scraper container: {settings.azure_scraper_container}")
-                    await container_manager.stop_container(settings.azure_scraper_container)
+                    logging.info(
+                        f"Stopping scraper container: {settings.azure_scraper_container}"
+                    )
+                    await container_manager.stop_container(
+                        settings.azure_scraper_container
+                    )
                     logging.info("Scraper container stopped successfully")
                 except Exception as exc:
                     logging.error(f"Failed to stop scraper container: {exc}")
-                
+
                 return  # Job complete, exit polling
-                
+
             elif status == "failed" or status == "error":
-                logging.error(f"Job {job_id} failed: {status_data.get('error', 'Unknown error')}")
-                
+                logging.error(
+                    f"Job {job_id} failed: {status_data.get('error', 'Unknown error')}"
+                )
+
                 # Stop container even on failure
                 try:
-                    await container_manager.stop_container(settings.azure_scraper_container)
+                    await container_manager.stop_container(
+                        settings.azure_scraper_container
+                    )
                 except Exception:
                     pass
-                
+
                 return  # Exit polling
-                
+
             elif status == "pending" or status == "running":
-                logging.info(f"Job {job_id} still {status}, will check again in 3 minutes...")
+                logging.info(
+                    f"Job {job_id} still {status}, will check again in 3 minutes..."
+                )
                 continue
             else:
                 logging.warning(f"Unknown status '{status}' for job {job_id}")
                 continue
-                
+
         except Exception as exc:
             logging.error(f"Error polling job {job_id}: {exc}")
             poll_count += 1
             continue
-    
+
     # Max polls reached
     logging.warning(f"Job {job_id} polling timed out after {max_polls * 3} minutes")
     try:
@@ -132,16 +145,16 @@ async def process_scraper_matches(job_id: str, brand: str, matches: list) -> lis
     """
     created_ids = []
     publisher = RabbitMQPublisher()
-    
+
     async with AsyncSessionLocal() as session:
         listing_repo = SqlAlchemyListingRepository(session)
         history_repo = SqlAlchemyStateHistoryRepository(session)
-        
+
         for match in matches:
             try:
                 listing_data = match.get("listing", {})
                 product_data = match.get("product", {})
-                
+
                 listing = ProductListing.create_from_scraper_match(
                     product_id=product_data.get("id"),
                     marketplace_url=listing_data.get("url"),
@@ -153,9 +166,9 @@ async def process_scraper_matches(job_id: str, brand: str, matches: list) -> lis
                     confidence_score=Decimal(str(match.get("confidence", 0))),
                     estimated_profit=Decimal(str(match.get("potential_profit", 0))),
                 )
-                
+
                 await listing_repo.save(listing)
-                
+
                 await history_repo.save(
                     listing_id=listing.id,
                     from_state=None,
@@ -163,18 +176,20 @@ async def process_scraper_matches(job_id: str, brand: str, matches: list) -> lis
                     triggered_by="scraper_polling",
                     metadata={"job_id": job_id, "brand": brand},
                 )
-                
+
                 await publisher.publish_many(listing.collect_events())
                 created_ids.append(listing.id)
-                
-                logging.info(f"Created lifecycle record {listing.id} for {product_data.get('model')}")
-                
+
+                logging.info(
+                    f"Created lifecycle record {listing.id} for {product_data.get('model')}"
+                )
+
             except Exception as exc:
                 logging.exception(f"Failed to process match: {exc}")
                 continue
-        
+
         await session.commit()
-    
+
     return created_ids
 
 
@@ -182,7 +197,8 @@ async def process_scraper_matches(job_id: str, brand: str, matches: list) -> lis
 # Health Check
 # ============================================================================
 
-@app.route(route="health", methods=["GET"])
+
+@app.route(route="health", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
 async def health(req: func.HttpRequest) -> func.HttpResponse:
     """Health check endpoint."""
     db_status = "connected"
@@ -195,19 +211,26 @@ async def health(req: func.HttpRequest) -> func.HttpResponse:
     rabbitmq_status = "connected"
     try:
         import pika
+
         connection = pika.BlockingConnection(pika.URLParameters(settings.rabbitmq_url))
         connection.close()
     except Exception as exc:
         rabbitmq_status = f"error: {exc}"
 
-    overall = "healthy" if db_status == "connected" and rabbitmq_status == "connected" else "degraded"
+    overall = (
+        "healthy"
+        if db_status == "connected" and rabbitmq_status == "connected"
+        else "degraded"
+    )
 
     return func.HttpResponse(
-        json.dumps({
-            "status": overall,
-            "database": db_status,
-            "rabbitmq": rabbitmq_status,
-        }),
+        json.dumps(
+            {
+                "status": overall,
+                "database": db_status,
+                "rabbitmq": rabbitmq_status,
+            }
+        ),
         mimetype="application/json",
     )
 
@@ -216,17 +239,20 @@ async def health(req: func.HttpRequest) -> func.HttpResponse:
 # Admin API - Trigger scrape
 # ============================================================================
 
-@app.route(route="admin/scrape/trigger", methods=["POST"])
+
+@app.route(
+    route="admin/scrape/trigger", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS
+)
 async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
     """
     Manually trigger a scrape job.
-    
+
     Request body (optional):
     {
         "brand": "Sony",
         "search_term": "Sony A7"
     }
-    
+
     If no body provided, uses search rotation logic.
     Starts background polling to check job status every 3 minutes.
     """
@@ -262,10 +288,10 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
     try:
         logging.info(f"Starting scraper container: {settings.azure_scraper_container}")
         await container_manager.start_container(settings.azure_scraper_container)
-        
+
         logging.info("Waiting 30 seconds for scraper to be ready...")
         await asyncio.sleep(30)
-        
+
     except Exception as exc:
         logging.error(f"Failed to start scraper container: {exc}")
         return func.HttpResponse(
@@ -279,21 +305,23 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
     try:
         result = await coordinator.trigger_scrape(brand=brand, search=search_term)
         job_id = str(result.job_id)
-        
+
         logging.info(f"Scrape job started: {job_id}")
-        
+
         # Start background polling task (fire and forget)
         asyncio.create_task(poll_scraper_and_process(job_id, brand, search_term))
-        
+
         return func.HttpResponse(
-            json.dumps({
-                "job_id": job_id,
-                "status": result.status,
-                "brand": brand,
-                "search_term": search_term,
-                "source": "manual" if payload.get("brand") else "rotation",
-                "message": "Scrape started. Results will be processed automatically when complete."
-            }),
+            json.dumps(
+                {
+                    "job_id": job_id,
+                    "status": result.status,
+                    "brand": brand,
+                    "search_term": search_term,
+                    "source": "manual" if payload.get("brand") else "rotation",
+                    "message": "Scrape started. Results will be processed automatically when complete.",
+                }
+            ),
             mimetype="application/json",
         )
     except Exception as exc:
@@ -309,10 +337,10 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
 async def get_scrape_status(req: func.HttpRequest) -> func.HttpResponse:
     """Get the status of a scrape job from ScraperV2."""
     job_id = req.route_params.get("job_id")
-    
+
     if not job_id:
         return func.HttpResponse("Missing job_id", status_code=400)
-    
+
     coordinator = ScraperCoordinator(ScraperClient())
     try:
         status = await coordinator.get_job_status(job_id)
@@ -332,6 +360,7 @@ async def get_scrape_status(req: func.HttpRequest) -> func.HttpResponse:
 # ============================================================================
 # Timer Trigger - Scheduled scraping
 # ============================================================================
+
 
 @app.schedule(schedule="0 0 9,14,21 * * *", arg_name="timer", run_on_startup=False)
 async def scheduled_scrape(timer: func.TimerRequest) -> None:
@@ -361,9 +390,9 @@ async def scheduled_scrape(timer: func.TimerRequest) -> None:
         coordinator = ScraperCoordinator(ScraperClient())
         result = await coordinator.trigger_scrape(brand=brand, search=search_term)
         job_id = str(result.job_id)
-        
+
         logging.info(f"Scheduled scrape job started: {job_id}")
-        
+
         # Start background polling (fire and forget)
         asyncio.create_task(poll_scraper_and_process(job_id, brand, search_term))
 
@@ -377,6 +406,7 @@ async def scheduled_scrape(timer: func.TimerRequest) -> None:
 # Admin API - List/Get Listings
 # ============================================================================
 
+
 @app.route(route="admin/listings", methods=["GET"])
 async def list_listings(req: func.HttpRequest) -> func.HttpResponse:
     """List all product listings with optional filtering."""
@@ -389,27 +419,31 @@ async def list_listings(req: func.HttpRequest) -> func.HttpResponse:
 
     async with AsyncSessionLocal() as session:
         repo = SqlAlchemyListingRepository(session)
-        listings, total = await repo.list_all(state=state, brand=brand, limit=limit, offset=offset)
+        listings, total = await repo.list_all(
+            state=state, brand=brand, limit=limit, offset=offset
+        )
 
         return func.HttpResponse(
-            json.dumps({
-                "listings": [
-                    {
-                        "id": str(l.id),
-                        "product_id": l.product_id,
-                        "brand": l.brand,
-                        "model": l.model,
-                        "state": l.state.value,
-                        "asking_price": float(l.asking_price),
-                        "estimated_profit": float(l.estimated_profit),
-                        "marketplace_url": l.marketplace_url,
-                    }
-                    for l in listings
-                ],
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-            }),
+            json.dumps(
+                {
+                    "listings": [
+                        {
+                            "id": str(l.id),
+                            "product_id": l.product_id,
+                            "brand": l.brand,
+                            "model": l.model,
+                            "state": l.state.value,
+                            "asking_price": float(l.asking_price),
+                            "estimated_profit": float(l.estimated_profit),
+                            "marketplace_url": l.marketplace_url,
+                        }
+                        for l in listings
+                    ],
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            ),
             mimetype="application/json",
         )
 
@@ -427,16 +461,18 @@ async def get_listing(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse("Listing not found", status_code=404)
 
         return func.HttpResponse(
-            json.dumps({
-                "id": str(listing.id),
-                "product_id": listing.product_id,
-                "brand": listing.brand,
-                "model": listing.model,
-                "state": listing.state.value,
-                "marketplace_url": listing.marketplace_url,
-                "asking_price": float(listing.asking_price),
-                "estimated_profit": float(listing.estimated_profit),
-                "created_at": listing.created_at.isoformat(),
-            }),
+            json.dumps(
+                {
+                    "id": str(listing.id),
+                    "product_id": listing.product_id,
+                    "brand": listing.brand,
+                    "model": listing.model,
+                    "state": listing.state.value,
+                    "marketplace_url": listing.marketplace_url,
+                    "asking_price": float(listing.asking_price),
+                    "estimated_profit": float(listing.estimated_profit),
+                    "created_at": listing.created_at.isoformat(),
+                }
+            ),
             mimetype="application/json",
         )

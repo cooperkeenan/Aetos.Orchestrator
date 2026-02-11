@@ -1,6 +1,7 @@
 """HTTP client for ScraperV2 service."""
-import structlog
+
 import httpx
+import structlog
 
 from src.config import settings
 
@@ -15,7 +16,7 @@ class ScraperClient:
     """Thin HTTP wrapper around the ScraperV2 REST API."""
 
     def __init__(
-        self, 
+        self,
         base_url: str = settings.scraper_api_url,
         api_key: str = settings.scraper_api_key,
     ) -> None:

@@ -6,15 +6,15 @@ if [ -f .env ]; then
     export $(cat .env | grep -v '^#' | xargs)
 fi
 
+FUNCTION_APP_NAME="${AZURE_FUNCTION_APP_NAME:-aetos-orchestrator-func}"
 RESOURCE_GROUP="${AZURE_RESOURCE_GROUP:-aetos-dev-rg}"
-CONTAINER_NAME="${AZURE_CONTAINER_NAME:-aetos-orchestrator}"
 
-echo "▶️  Starting container $CONTAINER_NAME..."
+echo "▶️  Starting function app $FUNCTION_APP_NAME..."
 
-az container start \
+az functionapp start \
     --resource-group $RESOURCE_GROUP \
-    --name $CONTAINER_NAME
+    --name $FUNCTION_APP_NAME
 
-echo "✅ Container started!"
+echo "✅ Function app started!"
 echo ""
-echo "Run './run.sh' and select 'Stream logs' to view container output"
+echo "Run './run.py' and select 'Stream logs' to view output"
