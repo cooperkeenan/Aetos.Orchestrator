@@ -11,7 +11,6 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from alembic import op
 
-# revision identifiers, used by Alembic.
 revision: str = "001_initial_schema"
 down_revision: Union[str, None] = None
 branch_labels: Union[str, Sequence[str], None] = None
@@ -33,8 +32,9 @@ def upgrade() -> None:
     )
     listing_state.create(op.get_bind(), checkfirst=True)
 
+    # Product lifecycle tracking table
     op.create_table(
-        "product_listings",
+        "product_lifecycle",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column("product_id", sa.Integer(), nullable=False),
         sa.Column("marketplace_url", sa.String(2048), nullable=False),
@@ -90,19 +90,21 @@ def upgrade() -> None:
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column("error_occurred_at", sa.DateTime(timezone=True), nullable=True),
     )
-    op.create_index("ix_product_listings_product_id", "product_listings", ["product_id"])
-    op.create_index("ix_product_listings_state", "product_listings", ["state"])
-    op.create_index("ix_product_listings_scraper_job_id", "product_listings", ["scraper_job_id"])
-    op.create_index("ix_product_listings_brand", "product_listings", ["brand"])
-    op.create_index("ix_product_listings_brand_state", "product_listings", ["brand", "state"])
+    
+    op.create_index("ix_product_lifecycle_product_id", "product_lifecycle", ["product_id"])
+    op.create_index("ix_product_lifecycle_state", "product_lifecycle", ["state"])
+    op.create_index("ix_product_lifecycle_scraper_job_id", "product_lifecycle", ["scraper_job_id"])
+    op.create_index("ix_product_lifecycle_brand", "product_lifecycle", ["brand"])
+    op.create_index("ix_product_lifecycle_brand_state", "product_lifecycle", ["brand", "state"])
 
+    # State history table for audit trail
     op.create_table(
         "product_state_history",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
         sa.Column(
-            "listing_id",
+            "lifecycle_id",
             UUID(as_uuid=True),
-            sa.ForeignKey("product_listings.id", ondelete="CASCADE"),
+            sa.ForeignKey("product_lifecycle.id", ondelete="CASCADE"),
             nullable=False,
         ),
         sa.Column("from_state", listing_state, nullable=True),
@@ -116,10 +118,10 @@ def upgrade() -> None:
         sa.Column("triggered_by", sa.String(256), nullable=False),
         sa.Column("metadata", JSONB, nullable=False, server_default=sa.text("'{}'")),
     )
-    op.create_index("ix_product_state_history_listing_id", "product_state_history", ["listing_id"])
+    op.create_index("ix_product_state_history_lifecycle_id", "product_state_history", ["lifecycle_id"])
 
 
 def downgrade() -> None:
     op.drop_table("product_state_history")
-    op.drop_table("product_listings")
+    op.drop_table("product_lifecycle")
     sa.Enum(name="listing_state").drop(op.get_bind(), checkfirst=True)
