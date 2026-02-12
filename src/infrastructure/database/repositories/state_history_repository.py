@@ -4,16 +4,13 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.application.interfaces.state_history_repository import (
-    StateHistoryRecord,
-    StateHistoryRepository,
-)
 from src.domain.enums.listing_state import ListingState
 from src.infrastructure.database.models import ProductStateHistoryModel
+from src.infrastructure.database.repositories.state_history_record import StateHistoryRecord
 
 
-class SqlAlchemyStateHistoryRepository(StateHistoryRepository):
-    """SQLAlchemy-backed implementation of StateHistoryRepository."""
+class SqlAlchemyStateHistoryRepository:
+    """SQLAlchemy implementation for state history persistence."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session

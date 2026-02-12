@@ -7,14 +7,11 @@ simplicity; swap for a persistent connection pool in production.
 """
 import asyncio
 import json
-import uuid
-from datetime import datetime
 from functools import partial
 
 import pika
 import structlog
 
-from src.application.interfaces.event_publisher import EventPublisher
 from src.config import settings
 from src.domain.events.domain_events import (
     DomainEvent,
@@ -90,7 +87,7 @@ def _blocking_publish(rabbitmq_url: str, routing_key: str, body: str) -> None:
         connection.close()
 
 
-class RabbitMQPublisher(EventPublisher):
+class RabbitMQPublisher:
     """Publishes domain events to a RabbitMQ topic exchange."""
 
     def __init__(self, rabbitmq_url: str = settings.rabbitmq_url) -> None:
@@ -113,3 +110,7 @@ class RabbitMQPublisher(EventPublisher):
                 error=str(exc),
             )
             # Don't re-raise — event publishing failure should not crash the request.
+
+    async def publish_many(self, events: list[DomainEvent]) -> None:
+        for event in events:
+            await self.publish(event)
