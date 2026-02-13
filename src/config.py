@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # Azure Container Instance settings
     azure_subscription_id: str = "37035190-2489-46aa-bc55-ccc9fc751ead"
     azure_resource_group: str = "aetos-dev-rg"
-    azure_scraper_container: str = "aetos-scraper"
+    azure_scraper_container: str = "aetos-api"
     azure_chatterbot_container: str = "chatterbot"
     azure_function_app_name: str = "aetos-orchestrator-func"
 

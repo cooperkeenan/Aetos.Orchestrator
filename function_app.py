@@ -31,8 +31,10 @@ from src.infrastructure.messaging.rabbitmq_publisher import RabbitMQPublisher
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
 
-# Initialize container manager
-container_manager = AzureContainerManager()
+
+def _get_container_manager() -> AzureContainerManager:
+    """Lazy factory — avoids crashing at import time if Azure credentials aren't ready."""
+    return AzureContainerManager()
 
 
 async def poll_scraper_and_process(job_id: str, brand: str, search_term: str) -> None:
@@ -61,18 +63,14 @@ async def poll_scraper_and_process(job_id: str, brand: str, search_term: str) ->
             if status == "completed":
                 logging.info(f"Job {job_id} completed! Processing results...")
 
-                # Extract matches from result
                 result = status_data.get("result", {})
                 matches = result.get("matches", [])
 
                 logging.info(f"Found {len(matches)} matches for {brand}")
 
                 if matches:
-                    # Process matches - create lifecycle records
                     created_ids = await process_scraper_matches(job_id, brand, matches)
 
-                    # TODO: Send to Chatterbot (Phase 2)
-                    # For now, just log the matches
                     logging.info(f"=== MATCHES TO SEND TO CHATTERBOT ===")
                     for match in matches:
                         listing_info = match.get("listing", {})
@@ -87,34 +85,30 @@ async def poll_scraper_and_process(job_id: str, brand: str, search_term: str) ->
                 else:
                     logging.info(f"No matches found for {brand}")
 
-                # Stop the scraper container to save costs
                 try:
                     logging.info(
                         f"Stopping scraper container: {settings.azure_scraper_container}"
                     )
-                    await container_manager.stop_container(
+                    await _get_container_manager().stop_container(
                         settings.azure_scraper_container
                     )
                     logging.info("Scraper container stopped successfully")
                 except Exception as exc:
                     logging.error(f"Failed to stop scraper container: {exc}")
 
-                return  # Job complete, exit polling
+                return
 
             elif status == "failed" or status == "error":
                 logging.error(
                     f"Job {job_id} failed: {status_data.get('error', 'Unknown error')}"
                 )
-
-                # Stop container even on failure
                 try:
-                    await container_manager.stop_container(
+                    await _get_container_manager().stop_container(
                         settings.azure_scraper_container
                     )
                 except Exception:
                     pass
-
-                return  # Exit polling
+                return
 
             elif status == "pending" or status == "running":
                 logging.info(
@@ -130,10 +124,9 @@ async def poll_scraper_and_process(job_id: str, brand: str, search_term: str) ->
             poll_count += 1
             continue
 
-    # Max polls reached
     logging.warning(f"Job {job_id} polling timed out after {max_polls * 3} minutes")
     try:
-        await container_manager.stop_container(settings.azure_scraper_container)
+        await _get_container_manager().stop_container(settings.azure_scraper_container)
     except Exception:
         pass
 
@@ -225,11 +218,7 @@ async def health(req: func.HttpRequest) -> func.HttpResponse:
 
     return func.HttpResponse(
         json.dumps(
-            {
-                "status": overall,
-                "database": db_status,
-                "rabbitmq": rabbitmq_status,
-            }
+            {"status": overall, "database": db_status, "rabbitmq": rabbitmq_status}
         ),
         mimetype="application/json",
     )
@@ -241,7 +230,7 @@ async def health(req: func.HttpRequest) -> func.HttpResponse:
 
 
 @app.route(
-    route="admin/scrape/trigger", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS
+    route="manage/scrape/trigger", methods=["POST"], auth_level=func.AuthLevel.ANONYMOUS
 )
 async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
     """
@@ -265,7 +254,6 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
         brand = None
         search_term = None
 
-    # If no brand specified, use rotation logic
     if not brand:
         logging.info("No brand specified, using search rotation")
         rotation_repo = SearchRotationRepository(settings.products_database_url)
@@ -284,14 +272,11 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
         search_term = search_term or brand
         logging.info(f"Using provided: {brand} - '{search_term}'")
 
-    # START ScraperV2 container
     try:
         logging.info(f"Starting scraper container: {settings.azure_scraper_container}")
-        await container_manager.start_container(settings.azure_scraper_container)
-
+        await _get_container_manager().start_container(settings.azure_scraper_container)
         logging.info("Waiting 30 seconds for scraper to be ready...")
         await asyncio.sleep(30)
-
     except Exception as exc:
         logging.error(f"Failed to start scraper container: {exc}")
         return func.HttpResponse(
@@ -300,7 +285,6 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
             status_code=500,
         )
 
-    # Trigger scrape
     coordinator = ScraperCoordinator(ScraperClient())
     try:
         result = await coordinator.trigger_scrape(brand=brand, search=search_term)
@@ -308,7 +292,6 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
 
         logging.info(f"Scrape job started: {job_id}")
 
-        # Start background polling task (fire and forget)
         asyncio.create_task(poll_scraper_and_process(job_id, brand, search_term))
 
         return func.HttpResponse(
@@ -333,7 +316,12 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 
-@app.route(route="admin/scrape/{job_id}/status", methods=["GET"])
+# ============================================================================
+# Admin API - Scrape job status
+# ============================================================================
+
+
+@app.route(route="manage/scrape/status/{job_id}", methods=["GET"])
 async def get_scrape_status(req: func.HttpRequest) -> func.HttpResponse:
     """Get the status of a scrape job from ScraperV2."""
     job_id = req.route_params.get("job_id")
@@ -344,10 +332,7 @@ async def get_scrape_status(req: func.HttpRequest) -> func.HttpResponse:
     coordinator = ScraperCoordinator(ScraperClient())
     try:
         status = await coordinator.get_job_status(job_id)
-        return func.HttpResponse(
-            json.dumps(status),
-            mimetype="application/json",
-        )
+        return func.HttpResponse(json.dumps(status), mimetype="application/json")
     except Exception as exc:
         logging.error(f"Failed to get job status: {exc}")
         return func.HttpResponse(
@@ -367,7 +352,6 @@ async def scheduled_scrape(timer: func.TimerRequest) -> None:
     """
     Runs 3 times per day: 9am, 2pm, 9pm UTC.
     Uses search rotation to cycle through brands.
-    Starts background polling for results.
     """
     logging.info("Starting scheduled scrape with rotation")
 
@@ -382,18 +366,15 @@ async def scheduled_scrape(timer: func.TimerRequest) -> None:
     logging.info(f"Scheduled scrape: {brand} - '{search_term}'")
 
     try:
-        # Start ScraperV2 container
-        await container_manager.start_container(settings.azure_scraper_container)
+        await _get_container_manager().start_container(settings.azure_scraper_container)
         await asyncio.sleep(30)
 
-        # Trigger scrape
         coordinator = ScraperCoordinator(ScraperClient())
         result = await coordinator.trigger_scrape(brand=brand, search=search_term)
         job_id = str(result.job_id)
 
         logging.info(f"Scheduled scrape job started: {job_id}")
 
-        # Start background polling (fire and forget)
         asyncio.create_task(poll_scraper_and_process(job_id, brand, search_term))
 
     except Exception as exc:
@@ -407,7 +388,7 @@ async def scheduled_scrape(timer: func.TimerRequest) -> None:
 # ============================================================================
 
 
-@app.route(route="admin/listings", methods=["GET"])
+@app.route(route="manage/listings", methods=["GET"])
 async def list_listings(req: func.HttpRequest) -> func.HttpResponse:
     """List all product listings with optional filtering."""
     state_param = req.params.get("state")
@@ -448,7 +429,7 @@ async def list_listings(req: func.HttpRequest) -> func.HttpResponse:
         )
 
 
-@app.route(route="admin/listings/{listing_id}", methods=["GET"])
+@app.route(route="manage/listing/{listing_id}", methods=["GET"])
 async def get_listing(req: func.HttpRequest) -> func.HttpResponse:
     """Get a specific listing by ID."""
     listing_id = req.route_params.get("listing_id")

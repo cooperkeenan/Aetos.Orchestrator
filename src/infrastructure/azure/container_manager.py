@@ -35,7 +35,13 @@ class AzureContainerManager:
 
         try:
             logger.info("starting_container", container=container_name, rg=self.resource_group)
-            self.client.container_groups.start(self.resource_group, container_name)
+            container_groups = self.client.container_groups
+            if hasattr(container_groups, "begin_start"):
+                container_groups.begin_start(self.resource_group, container_name).result()
+            elif hasattr(container_groups, "start"):
+                container_groups.start(self.resource_group, container_name)
+            else:
+                raise ContainerManagerError("Container group start operation is not available in this SDK version")
             logger.info("container_started", container=container_name)
         except Exception as exc:
             logger.error(

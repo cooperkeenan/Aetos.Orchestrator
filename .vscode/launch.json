@@ -1,0 +1,34 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Functions Host (WSL)",
+      "type": "python",
+      "request": "launch",
+      "program": "/usr/bin/env",
+      "args": [
+        "bash",
+        "-lc",
+        "source venv/bin/activate && func host start --python"
+      ],
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Attach debugpy (WSL)",
+      "type": "debugpy",
+      "request": "attach",
+      "connect": { "host": "127.0.0.1", "port": 9091 },
+      "justMyCode": false
+    }
+  ],
+  "compounds": [
+    {
+      "name": "F5: Run + Debug Azure Functions (WSL)",
+      "configurations": [
+        "Run Functions Host (WSL)",
+        "Attach debugpy (WSL)"
+      ]
+    }
+  ]
+}
