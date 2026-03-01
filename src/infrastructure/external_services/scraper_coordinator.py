@@ -21,9 +21,12 @@ class ScraperCoordinator:
     def __init__(self, client: ScraperClient) -> None:
         self._client = client
 
-    async def trigger_scrape(self, brand: str, search: str | None = None) -> ScraperJobResult:
-        logger.info("triggering_scrape", brand=brand, search=search)
-        result = await self._client.start_scrape(brand=brand, search=search or brand)
+    async def trigger_scrape(
+        self, brands: list[str], search: str | None = None
+    ) -> ScraperJobResult:
+        logger.info("triggering_scrape", brands=brands, search=search)
+        default_search = search or (brands[0] if brands else None)
+        result = await self._client.start_scrape(brands=brands, search=default_search)
         return ScraperJobResult(
             job_id=UUID(result["job_id"]),
             status=result["status"],

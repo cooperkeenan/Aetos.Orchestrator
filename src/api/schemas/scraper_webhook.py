@@ -1,5 +1,6 @@
+from __future__ import annotations
 from uuid import UUID
-
+from typing import List
 from pydantic import BaseModel, Field
 
 
@@ -24,5 +25,5 @@ class ScraperMatchSchema(BaseModel):
 
 class ScraperJobCompleteWebhookPayload(BaseModel):
     job_id: UUID
-    brand: str
+    brands: List[str]
     matches: list[ScraperMatchSchema]

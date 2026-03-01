@@ -57,7 +57,7 @@ async def scraper_job_complete(
                 from_state=None,
                 to_state=ListingState.FOUND,
                 triggered_by="scraper_webhook",
-                metadata={"job_id": str(payload.job_id), "brand": payload.brand},
+                metadata={"job_id": str(payload.job_id), "brands": payload.brands},
             )
 
             await publisher.publish_many(listing.collect_events())

@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from src.domain.enums.listing_state import ListingState
 
@@ -67,8 +67,17 @@ class TransitionRequest(BaseModel):
 
 
 class TriggerScrapeRequest(BaseModel):
-    brand: str
+    brands: list[str] | None = None
+    brand: str | None = None
     search: str | None = None
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "TriggerScrapeRequest":
+        if not self.brands and self.brand:
+            self.brands = [self.brand]
+        if not self.brands:
+            raise ValueError("brands or brand is required")
+        return self
 
 
 class TriggerScrapeResponse(BaseModel):

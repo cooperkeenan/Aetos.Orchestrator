@@ -238,7 +238,7 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
 
     Request body (optional):
     {
-        "brand": "Sony",
+        "brands": ["Sony", "Canon"],
         "search_term": "Sony A7"
     }
 
@@ -247,14 +247,19 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
     """
     try:
         payload = req.get_json() if req.get_body() else {}
+        brands = payload.get("brands")
         brand = payload.get("brand")
-        search_term = payload.get("search_term")
+        search_term = payload.get("search_term") or payload.get("search")
     except (ValueError, TypeError):
         payload = {}
+        brands = None
         brand = None
         search_term = None
 
-    if not brand:
+    if not brands and brand:
+        brands = [brand]
+
+    if not brands:
         logging.info("No brand specified, using search rotation")
         rotation_repo = SearchRotationRepository(settings.products_database_url)
         next_search = await rotation_repo.get_next_search()
@@ -266,11 +271,12 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
                 status_code=500,
             )
 
-        brand, search_term = next_search
-        logging.info(f"Using rotation: {brand} - '{search_term}'")
+        rotation_brand, search_term = next_search
+        brands = [rotation_brand]
+        logging.info(f"Using rotation: {rotation_brand} - '{search_term}'")
     else:
-        search_term = search_term or brand
-        logging.info(f"Using provided: {brand} - '{search_term}'")
+        search_term = search_term or brands[0]
+        logging.info(f"Using provided: {brands} - '{search_term}'")
 
     try:
         logging.info(f"Starting scraper container: {settings.azure_scraper_container}")
@@ -287,7 +293,7 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
 
     coordinator = ScraperCoordinator(ScraperClient())
     try:
-        result = await coordinator.trigger_scrape(brand=brand, search=search_term)
+        result = await coordinator.trigger_scrape(brands=brands, search=search_term)
         job_id = str(result.job_id)
 
         logging.info(f"Scrape job started: {job_id}")
@@ -299,7 +305,7 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
                 {
                     "job_id": job_id,
                     "status": result.status,
-                    "brand": brand,
+                    "brands": brands,
                     "search_term": search_term,
                     "source": "manual" if payload.get("brand") else "rotation",
                     "message": "Scrape started. Results will be processed automatically when complete.",
@@ -370,7 +376,7 @@ async def scheduled_scrape(timer: func.TimerRequest) -> None:
         await asyncio.sleep(30)
 
         coordinator = ScraperCoordinator(ScraperClient())
-        result = await coordinator.trigger_scrape(brand=brand, search=search_term)
+        result = await coordinator.trigger_scrape(brands=[brand], search=search_term)
         job_id = str(result.job_id)
 
         logging.info(f"Scheduled scrape job started: {job_id}")

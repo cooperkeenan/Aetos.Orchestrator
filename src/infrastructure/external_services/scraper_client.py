@@ -27,13 +27,15 @@ class ScraperClient:
             "Content-Type": "application/json",
         }
 
-    async def start_scrape(self, brand: str, search: str | None = None) -> dict:  # type: ignore[type-arg]
+    async def start_scrape(
+        self, brands: list[str], search: str | None = None
+    ) -> dict:  # type: ignore[type-arg]
         """
         POST /scrape → {"job_id": "...", "status": "pending", "message": "..."}
         """
         payload = {
-            "brand": brand,
-            "search": search or brand,
+            "brands": brands,
+            "search": search or (brands[0] if brands else None),
         }
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -48,7 +50,7 @@ class ScraperClient:
                 logger.info(
                     "scraper_job_started",
                     job_id=data.get("job_id"),
-                    brand=brand,
+                    brands=brands,
                     status=data.get("status"),
                 )
                 return data

@@ -158,6 +158,6 @@ async def trigger_scrape(
     body: TriggerScrapeRequest,
     coordinator: ScraperCoordinator = Depends(get_scraper_coordinator),
 ) -> TriggerScrapeResponse:
-    """Manually trigger a ScraperV2 job for a given brand."""
-    result = await coordinator.trigger_scrape(brand=body.brand, search=body.search)
+    """Manually trigger a ScraperV2 job for given brands."""
+    result = await coordinator.trigger_scrape(brands=body.brands, search=body.search)
     return TriggerScrapeResponse(job_id=result.job_id, status=result.status)
