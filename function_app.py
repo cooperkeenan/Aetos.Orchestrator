@@ -35,7 +35,7 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN", "8592605399:AAHIqYbutzTKI6NqBad3aSjKxsl56HbGQCs"
 )
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5003681480")
 
 _UNAUTHORIZED = func.HttpResponse(
     json.dumps({"error": "Unauthorized"}),
@@ -53,38 +53,105 @@ def _get_container_manager() -> AzureContainerManager:
 
 
 def _format_telegram_message(brands: list, matches: list) -> str:
-    brand_str = ", ".join(brands) if brands else "Unknown"
+    brand_str = ", ".join(str(b) for b in brands) if brands else "Unknown"
     lines = [
-        f"📷 ScraperV2 Session Results",
+        "📷 ScraperV2 Session Results",
         f"Brand: {brand_str}",
         f"Matches: {len(matches)} found",
     ]
     for match in matches:
         listing = match.get("listing", {})
         product = match.get("product", {})
+
+        url = listing.get("url", "")
+        price = round(listing.get("price", 0))
+        profit = round(match.get("potential_profit", 0))
+
+        short_url = url.split("?")[0].rstrip("/")
+
         lines += [
             "",
-            f"{product.get('brand', '')} {product.get('model', '')}",
-            f"£{listing.get('price', '?')}",
-            listing.get("url", ""),
+            f"{product.get('brand', '')} {product.get('model', '')}".strip()
+            or "Unknown product",
+            f"\u00a3{price}  \u2022  Est. Profit \u00a3{profit}",
+            short_url,
         ]
-    return "\n".join(lines)
+
+    message = "\n".join(lines)
+
+    logging.info(
+        f"Telegram message built — "
+        f"brands={brands}, matches={len(matches)}, length={len(message)} chars"
+    )
+
+    if len(message) > 4096:
+        logging.warning(
+            f"Telegram message exceeds 4096 char limit ({len(message)} chars) — truncating"
+        )
+        message = message[:4090] + "\n[…]"
+
+    return message
 
 
 async def _send_telegram(message: str) -> None:
     if not TELEGRAM_CHAT_ID:
-        logging.warning("TELEGRAM_CHAT_ID not set — skipping notification")
+        logging.warning("TELEGRAM_CHAT_ID not set — skipping Telegram notification")
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    if not TELEGRAM_BOT_TOKEN:
+        logging.warning("TELEGRAM_BOT_TOKEN not set — skipping Telegram notification")
+        return
+
+    # Coerce chat_id to int — Telegram requires numeric IDs for users/groups.
+    # Raw env strings work in most cases but can cause 400s with supergroup IDs.
+    try:
+        chat_id: int | str = int(TELEGRAM_CHAT_ID)
+    except (ValueError, TypeError):
+        chat_id = TELEGRAM_CHAT_ID  # channel usernames like @mychannel stay as strings
+
+    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        # No parse_mode — explicit plain text to prevent Telegram misreading
+        # special characters in URLs/titles as Markdown syntax
+    }
+
+    logging.info(
+        f"Sending Telegram notification — "
+        f"chat_id={chat_id!r}, message_length={len(message)}, "
+        f"token_prefix={TELEGRAM_BOT_TOKEN[:10]}..."
+    )
+    logging.debug(f"Telegram message body:\n{message}")
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}
+            response = await client.post(api_url, json=payload)
+
+        logging.info(
+            f"Telegram API response — "
+            f"status={response.status_code}, body={response.text}"
+        )
+
+        if response.status_code == 200:
+            logging.info("Telegram notification sent successfully")
+        else:
+            # Telegram always returns JSON with an 'description' field explaining
+            # the error — this is the key diagnostic we were missing before
+            logging.error(
+                f"Telegram API returned {response.status_code} — "
+                f"full response: {response.text}"
             )
-            response.raise_for_status()
-            logging.info("Telegram notification sent")
-    except Exception as exc:
-        logging.error(f"Failed to send Telegram notification: {exc}")
+
+    except httpx.TimeoutException:
+        logging.error(
+            f"Telegram notification timed out after 10s — "
+            f"chat_id={chat_id!r}, message_length={len(message)}"
+        )
+    except httpx.RequestError as exc:
+        logging.error(
+            f"Telegram connection failed — " f"error={exc!r}, chat_id={chat_id!r}"
+        )
 
 
 async def _process_scraper_matches(
