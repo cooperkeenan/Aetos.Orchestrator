@@ -73,7 +73,9 @@ async def list_listings(
     repo: SqlAlchemyListingRepository = Depends(get_listing_repo),
 ) -> PaginatedListingsResponse:
     """List product listings with optional filtering."""
-    listings, total = await repo.list_all(state=state, brand=brand, limit=limit, offset=offset)
+    listings, total = await repo.list_all(
+        state=state, brand=brand, limit=limit, offset=offset
+    )
     return PaginatedListingsResponse(
         listings=[_listing_to_response(l) for l in listings],
         total=total,
@@ -89,7 +91,9 @@ async def get_listing(
 ) -> ListingResponse:
     listing = await repo.get_by_id(listing_id)
     if listing is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found."
+        )
     return _listing_to_response(listing)
 
 
@@ -101,7 +105,9 @@ async def get_listing_history(
 ) -> ListingHistoryResponse:
     listing = await listing_repo.get_by_id(listing_id)
     if listing is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found."
+        )
 
     history = await history_repo.get_history_for_listing(listing_id)
     return ListingHistoryResponse(
@@ -129,13 +135,17 @@ async def transition_listing(
 ) -> ListingResponse:
     listing = await listing_repo.get_by_id(listing_id)
     if listing is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Listing not found."
+        )
 
     from_state = listing.state
     try:
         listing.transition_to(body.to_state, triggered_by="admin_api")
     except InvalidStateTransitionError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        )
 
     await listing_repo.save(listing)
 
@@ -159,5 +169,7 @@ async def trigger_scrape(
     coordinator: ScraperCoordinator = Depends(get_scraper_coordinator),
 ) -> TriggerScrapeResponse:
     """Manually trigger a ScraperV2 job for given brands."""
-    result = await coordinator.trigger_scrape(brands=body.brands, search=body.search)
+    result = await coordinator.trigger_scrape(
+        brands=body.brands or [], search=body.search
+    )
     return TriggerScrapeResponse(job_id=result.job_id, status=result.status)

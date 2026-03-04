@@ -3,10 +3,12 @@
 import asyncio
 import json
 import logging
+import os
 from decimal import Decimal
 from uuid import UUID
 
 import azure.functions as func
+import httpx
 from sqlalchemy import text
 
 from src.api.schemas.scraper_webhook import ScraperJobCompleteWebhookPayload
@@ -30,6 +32,11 @@ from src.infrastructure.messaging.rabbitmq_publisher import RabbitMQPublisher
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN", "8592605399:AAHIqYbutzTKI6NqBad3aSjKxsl56HbGQCs"
+)
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 _UNAUTHORIZED = func.HttpResponse(
     json.dumps({"error": "Unauthorized"}),
     mimetype="application/json",
@@ -45,7 +52,44 @@ def _get_container_manager() -> AzureContainerManager:
     return AzureContainerManager()
 
 
-async def _process_scraper_matches(job_id: str, brand: str, matches: list) -> list[UUID]:
+def _format_telegram_message(brands: list, matches: list) -> str:
+    brand_str = ", ".join(brands) if brands else "Unknown"
+    lines = [
+        f"📷 ScraperV2 Session Results",
+        f"Brand: {brand_str}",
+        f"Matches: {len(matches)} found",
+    ]
+    for match in matches:
+        listing = match.get("listing", {})
+        product = match.get("product", {})
+        lines += [
+            "",
+            f"{product.get('brand', '')} {product.get('model', '')}",
+            f"£{listing.get('price', '?')}",
+            listing.get("url", ""),
+        ]
+    return "\n".join(lines)
+
+
+async def _send_telegram(message: str) -> None:
+    if not TELEGRAM_CHAT_ID:
+        logging.warning("TELEGRAM_CHAT_ID not set — skipping notification")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}
+            )
+            response.raise_for_status()
+            logging.info("Telegram notification sent")
+    except Exception as exc:
+        logging.error(f"Failed to send Telegram notification: {exc}")
+
+
+async def _process_scraper_matches(
+    job_id: str, brand: str, matches: list
+) -> list[UUID]:
     created_ids = []
     publisher = RabbitMQPublisher()
 
@@ -80,7 +124,9 @@ async def _process_scraper_matches(job_id: str, brand: str, matches: list) -> li
                 )
                 await publisher.publish_many(listing.collect_events())
                 created_ids.append(listing.id)
-                logging.info(f"Created lifecycle record {listing.id} for {product_data.get('model')}")
+                logging.info(
+                    f"Created lifecycle record {listing.id} for {product_data.get('model')}"
+                )
 
             except Exception as exc:
                 logging.exception(f"Failed to process match: {exc}")
@@ -117,15 +163,22 @@ async def health(req: func.HttpRequest) -> func.HttpResponse:
     rabbitmq_status = "connected"
     try:
         import pika
+
         connection = pika.BlockingConnection(pika.URLParameters(settings.rabbitmq_url))
         connection.close()
     except Exception as exc:
         rabbitmq_status = f"error: {exc}"
 
-    overall = "healthy" if db_status == "connected" and rabbitmq_status == "connected" else "degraded"
+    overall = (
+        "healthy"
+        if db_status == "connected" and rabbitmq_status == "connected"
+        else "degraded"
+    )
 
     return func.HttpResponse(
-        json.dumps({"status": overall, "database": db_status, "rabbitmq": rabbitmq_status}),
+        json.dumps(
+            {"status": overall, "database": db_status, "rabbitmq": rabbitmq_status}
+        ),
         mimetype="application/json",
     )
 
@@ -160,18 +213,23 @@ async def scraper_job_complete(req: func.HttpRequest) -> func.HttpResponse:
             status_code=400,
         )
 
-    logging.info(f"Received scraper webhook: job={job_id}, matches={len(matches)}, brands={brands}")
+    logging.info(
+        f"Received scraper webhook: job={job_id}, matches={len(matches)}, brands={brands}"
+    )
 
     created_ids = await _process_scraper_matches(job_id, brand, matches)
 
+    await _send_telegram(_format_telegram_message(brands, matches))
     asyncio.create_task(_stop_scraper_container())
 
     return func.HttpResponse(
-        json.dumps({
-            "accepted": True,
-            "created_listings": len(created_ids),
-            "skipped": len(matches) - len(created_ids),
-        }),
+        json.dumps(
+            {
+                "accepted": True,
+                "created_listings": len(created_ids),
+                "skipped": len(matches) - len(created_ids),
+            }
+        ),
         mimetype="application/json",
         status_code=202,
     )
@@ -191,7 +249,9 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
     except (ValueError, TypeError):
         payload = {}
 
-    brands = payload.get("brands") or ([payload["brand"]] if payload.get("brand") else None)
+    brands = payload.get("brands") or (
+        [payload["brand"]] if payload.get("brand") else None
+    )
     search_term = payload.get("search_term") or payload.get("search")
     source = "manual"
 
@@ -228,14 +288,16 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
     try:
         result = await coordinator.trigger_scrape(brands=brands, search=search_term)
         return func.HttpResponse(
-            json.dumps({
-                "job_id": str(result.job_id),
-                "status": result.status,
-                "brands": brands,
-                "search_term": search_term,
-                "source": source,
-                "message": "Scrape started. Results will be delivered via webhook when complete.",
-            }),
+            json.dumps(
+                {
+                    "job_id": str(result.job_id),
+                    "status": result.status,
+                    "brands": brands,
+                    "search_term": search_term,
+                    "source": source,
+                    "message": "Scrape started. Results will be delivered via webhook when complete.",
+                }
+            ),
             mimetype="application/json",
         )
     except Exception as exc:
@@ -295,27 +357,31 @@ async def list_listings(req: func.HttpRequest) -> func.HttpResponse:
 
     async with AsyncSessionLocal() as session:
         repo = SqlAlchemyListingRepository(session)
-        listings, total = await repo.list_all(state=state, brand=brand, limit=limit, offset=offset)
+        listings, total = await repo.list_all(
+            state=state, brand=brand, limit=limit, offset=offset
+        )
 
         return func.HttpResponse(
-            json.dumps({
-                "listings": [
-                    {
-                        "id": str(l.id),
-                        "product_id": l.product_id,
-                        "brand": l.brand,
-                        "model": l.model,
-                        "state": l.state.value,
-                        "asking_price": float(l.asking_price),
-                        "estimated_profit": float(l.estimated_profit),
-                        "marketplace_url": l.marketplace_url,
-                    }
-                    for l in listings
-                ],
-                "total": total,
-                "limit": limit,
-                "offset": offset,
-            }),
+            json.dumps(
+                {
+                    "listings": [
+                        {
+                            "id": str(l.id),
+                            "product_id": l.product_id,
+                            "brand": l.brand,
+                            "model": l.model,
+                            "state": l.state.value,
+                            "asking_price": float(l.asking_price),
+                            "estimated_profit": float(l.estimated_profit),
+                            "marketplace_url": l.marketplace_url,
+                        }
+                        for l in listings
+                    ],
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            ),
             mimetype="application/json",
         )
 
@@ -334,16 +400,18 @@ async def get_listing(req: func.HttpRequest) -> func.HttpResponse:
             return func.HttpResponse("Listing not found", status_code=404)
 
         return func.HttpResponse(
-            json.dumps({
-                "id": str(listing.id),
-                "product_id": listing.product_id,
-                "brand": listing.brand,
-                "model": listing.model,
-                "state": listing.state.value,
-                "marketplace_url": listing.marketplace_url,
-                "asking_price": float(listing.asking_price),
-                "estimated_profit": float(listing.estimated_profit),
-                "created_at": listing.created_at.isoformat(),
-            }),
+            json.dumps(
+                {
+                    "id": str(listing.id),
+                    "product_id": listing.product_id,
+                    "brand": listing.brand,
+                    "model": listing.model,
+                    "state": listing.state.value,
+                    "marketplace_url": listing.marketplace_url,
+                    "asking_price": float(listing.asking_price),
+                    "estimated_profit": float(listing.estimated_profit),
+                    "created_at": listing.created_at.isoformat(),
+                }
+            ),
             mimetype="application/json",
         )
