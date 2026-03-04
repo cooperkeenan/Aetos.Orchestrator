@@ -61,7 +61,9 @@ az functionapp config appsettings set \
         AZURE_SUBSCRIPTION_ID="$AZURE_SUBSCRIPTION_ID" \
         AZURE_RESOURCE_GROUP="$AZURE_RESOURCE_GROUP" \
         AZURE_SCRAPER_CONTAINER="$AZURE_SCRAPER_CONTAINER" \
-        AzureWebJobsFeatureFlags="EnableWorkerIndexing"
+        AzureWebJobsFeatureFlags="EnableWorkerIndexing" \
+        TELEGRAM_BOT_TOKEN="$TELEGRAM_BOT_TOKEN" \
+        TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID"
 
 echo "🧹 Cleaning up..."
 rm -f deployment.zip

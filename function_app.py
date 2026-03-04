@@ -8,7 +8,6 @@ from decimal import Decimal
 from uuid import UUID
 
 import azure.functions as func
-import httpx
 from sqlalchemy import text
 
 from src.api.schemas.scraper_webhook import ScraperJobCompleteWebhookPayload
@@ -29,13 +28,9 @@ from src.infrastructure.database.repositories.state_history_repository import (
 from src.infrastructure.external_services.scraper_client import ScraperClient
 from src.infrastructure.external_services.scraper_coordinator import ScraperCoordinator
 from src.infrastructure.messaging.rabbitmq_publisher import RabbitMQPublisher
+from src.infrastructure.messaging.telegram_service import TelegramService
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
-
-TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN", "8592605399:AAHIqYbutzTKI6NqBad3aSjKxsl56HbGQCs"
-)
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5003681480")
 
 _UNAUTHORIZED = func.HttpResponse(
     json.dumps({"error": "Unauthorized"}),
@@ -50,108 +45,6 @@ def _authorized(req: func.HttpRequest) -> bool:
 
 def _get_container_manager() -> AzureContainerManager:
     return AzureContainerManager()
-
-
-def _format_telegram_message(brands: list, matches: list) -> str:
-    brand_str = ", ".join(str(b) for b in brands) if brands else "Unknown"
-    lines = [
-        "📷 ScraperV2 Session Results",
-        f"Brand: {brand_str}",
-        f"Matches: {len(matches)} found",
-    ]
-    for match in matches:
-        listing = match.get("listing", {})
-        product = match.get("product", {})
-
-        url = listing.get("url", "")
-        price = round(listing.get("price", 0))
-        profit = round(match.get("potential_profit", 0))
-
-        short_url = url.split("?")[0].rstrip("/")
-
-        lines += [
-            "",
-            f"{product.get('brand', '')} {product.get('model', '')}".strip()
-            or "Unknown product",
-            f"\u00a3{price}  \u2022  Est. Profit \u00a3{profit}",
-            short_url,
-        ]
-
-    message = "\n".join(lines)
-
-    logging.info(
-        f"Telegram message built — "
-        f"brands={brands}, matches={len(matches)}, length={len(message)} chars"
-    )
-
-    if len(message) > 4096:
-        logging.warning(
-            f"Telegram message exceeds 4096 char limit ({len(message)} chars) — truncating"
-        )
-        message = message[:4090] + "\n[…]"
-
-    return message
-
-
-async def _send_telegram(message: str) -> None:
-    if not TELEGRAM_CHAT_ID:
-        logging.warning("TELEGRAM_CHAT_ID not set — skipping Telegram notification")
-        return
-
-    if not TELEGRAM_BOT_TOKEN:
-        logging.warning("TELEGRAM_BOT_TOKEN not set — skipping Telegram notification")
-        return
-
-    # Coerce chat_id to int — Telegram requires numeric IDs for users/groups.
-    # Raw env strings work in most cases but can cause 400s with supergroup IDs.
-    try:
-        chat_id: int | str = int(TELEGRAM_CHAT_ID)
-    except (ValueError, TypeError):
-        chat_id = TELEGRAM_CHAT_ID  # channel usernames like @mychannel stay as strings
-
-    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": chat_id,
-        "text": message,
-        # No parse_mode — explicit plain text to prevent Telegram misreading
-        # special characters in URLs/titles as Markdown syntax
-    }
-
-    logging.info(
-        f"Sending Telegram notification — "
-        f"chat_id={chat_id!r}, message_length={len(message)}, "
-        f"token_prefix={TELEGRAM_BOT_TOKEN[:10]}..."
-    )
-    logging.debug(f"Telegram message body:\n{message}")
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(api_url, json=payload)
-
-        logging.info(
-            f"Telegram API response — "
-            f"status={response.status_code}, body={response.text}"
-        )
-
-        if response.status_code == 200:
-            logging.info("Telegram notification sent successfully")
-        else:
-            # Telegram always returns JSON with an 'description' field explaining
-            # the error — this is the key diagnostic we were missing before
-            logging.error(
-                f"Telegram API returned {response.status_code} — "
-                f"full response: {response.text}"
-            )
-
-    except httpx.TimeoutException:
-        logging.error(
-            f"Telegram notification timed out after 10s — "
-            f"chat_id={chat_id!r}, message_length={len(message)}"
-        )
-    except httpx.RequestError as exc:
-        logging.error(
-            f"Telegram connection failed — " f"error={exc!r}, chat_id={chat_id!r}"
-        )
 
 
 async def _process_scraper_matches(
@@ -286,7 +179,8 @@ async def scraper_job_complete(req: func.HttpRequest) -> func.HttpResponse:
 
     created_ids = await _process_scraper_matches(job_id, brand, matches)
 
-    await _send_telegram(_format_telegram_message(brands, matches))
+    telegram = TelegramService()
+    await telegram.send_scrape_results(brands, matches)
     asyncio.create_task(_stop_scraper_container())
 
     return func.HttpResponse(
@@ -383,28 +277,34 @@ async def trigger_scrape(req: func.HttpRequest) -> func.HttpResponse:
 
 @app.schedule(schedule="0 0 9,14,21 * * *", arg_name="timer", run_on_startup=False)
 async def scheduled_scrape(timer: func.TimerRequest) -> None:
-    """Runs 3x daily via search rotation. Results delivered via webhook."""
-    logging.info("Starting scheduled scrape with rotation")
+    """Triggers a scrape 3x daily at 09:00, 14:00, and 21:00 UTC."""
+    brands = ["Nikon", "Canon", "Sony"]
+    search = "Camera"
+    telegram = TelegramService()
 
-    rotation_repo = SearchRotationRepository(settings.products_database_url)
-    next_search = await rotation_repo.get_next_search()
-
-    if not next_search:
-        logging.warning("No searches configured in rotation table")
-        return
-
-    brand, search_term = next_search
-    logging.info(f"Scheduled scrape: {brand} - '{search_term}'")
+    logging.info(f"Scheduled scrape starting — brands={brands}, search={search!r}")
 
     try:
         await _get_container_manager().start_container(settings.azure_scraper_container)
+        logging.info("Scraper container started — waiting 30s for it to be ready")
         await asyncio.sleep(30)
-
-        coordinator = ScraperCoordinator(ScraperClient())
-        result = await coordinator.trigger_scrape(brands=[brand], search=search_term)
-        logging.info(f"Scheduled scrape job started: {result.job_id}")
     except Exception as exc:
-        logging.error(f"Failed to start scheduled scrape for {brand}: {exc}")
+        logging.error(f"Scheduled scrape failed to start container: {exc}")
+        await telegram.send_error(
+            "Scheduled scrape failed to start scraper container", exc
+        )
+        return
+
+    try:
+        coordinator = ScraperCoordinator(ScraperClient())
+        result = await coordinator.trigger_scrape(brands=brands, search=search)
+        logging.info(
+            f"Scheduled scrape job started — "
+            f"job_id={result.job_id}, brands={brands}, search={search!r}"
+        )
+    except Exception as exc:
+        logging.error(f"Scheduled scrape failed to trigger job: {exc}")
+        await telegram.send_error("Scheduled scrape failed to trigger scraper job", exc)
 
 
 # ============================================================================
